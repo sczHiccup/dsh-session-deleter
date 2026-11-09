@@ -1,6 +1,6 @@
 {
   "name": "@local/session-deleter",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "private": true,
   "description": "Delete a DeepSeek Harness session after a confirmed risk check",
   "type": "module",

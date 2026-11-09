@@ -6,6 +6,11 @@
  * through the Workspace archive admission (the same providers the user's own
  * stop actions use), then removes the Session's own durable artifacts:
  * the per-session JSONL log directory and the persisted projection checkpoint.
+ * Because a live Agent keeps its persistence handle, it can write either of them
+ * back after the removal, so the same guarded removal runs again at increasing
+ * delays. Once the log is verifiably gone, the archive mark is released again:
+ * it already did its job (stop + hide) and would otherwise leave a dead id in
+ * the durable archive set.
  *
  * Session deletion has no first-party seam. `dsh-session-persistence-jsonl`
  * states that nothing deletes session files and the seam exposes no deletion
@@ -79,23 +84,28 @@ async function runDeletion(ctx, invocation) {
   }
 
   const warnings = []
+  const logPath = typeof snapshot?.location?.path === 'string' ? snapshot.location.path : null
   const stopped = await stopRunningWork(ctx, sessionId, warnings)
-  const files = await removeSessionFiles(sessionId, snapshot, warnings)
+  const files = await removeSessionFiles(sessionId, logPath, warnings)
   const cached = await removeProjectionRecord(ctx, sessionId, warnings)
 
   // Report the truth: a Session still readable from storage after the attempt
   // is not deleted, most often because a live Agent still holds its handle.
   const left = await readSnapshot(persistence, sessionId, undefined)
   const remaining = left ? 'The Session is still readable from storage' : null
+  let released = false
   if (remaining) {
     warnings.push(`${remaining}; close Harness or prompt another Session and delete it again.`)
   } else {
-    // A live Agent writes its final projection checkpoint when it is disposed,
-    // which can land after this deletion. Sweep again once it has settled.
-    scheduleProjectionSweep(ctx, sessionId)
+    // A live Agent keeps its persistence handle after this deletion and can
+    // write the log and its projection checkpoint back. Sweep both while it
+    // settles, then take the archive mark back: once the log is gone there is
+    // nothing left for that mark to gate.
+    scheduleCleanupSweep(ctx, sessionId, logPath)
+    released = await releaseArchiveMark(ctx, sessionId, warnings)
   }
 
-  const summary = describeOutcome(sessionId, { stopped, files, cached })
+  const summary = describeOutcome(sessionId, { stopped, files, cached, released })
   if (warnings.length > 0) {
     return { kind: remaining ? 'error' : 'success', text: `${summary}\n${warnings.join('\n')}` }
   }
@@ -128,8 +138,7 @@ async function stopRunningWork(ctx, sessionId, warnings) {
  * ever touched, and the directory guards below refuse anything that does not
  * look exactly like the documented per-session layout.
  */
-async function removeSessionFiles(sessionId, snapshot, warnings) {
-  const logPath = snapshot?.location?.path
+async function removeSessionFiles(sessionId, logPath, warnings) {
   if (typeof logPath !== 'string' || logPath.length === 0) {
     return { removed: 0, directory: null, attempted: false }
   }
@@ -243,31 +252,25 @@ async function readSnapshot(persistence, sessionId, signal) {
 }
 
 /**
- * Re-remove the projection checkpoint at increasing delays. The cache writes on
- * session disposal, so the first attempt can be undone by a live Agent that
- * shuts down after this deletion; every sweep proves the Session is still gone
- * before touching its record.
+ * Re-remove what the settling Agent writes back. A live Agent keeps its
+ * persistence handle, so a flush that lands after the deletion can recreate the
+ * log file, and a late delivery can make it write a fresh projection checkpoint.
+ * Every sweep re-runs the same guarded removal, so anything that reappears in
+ * the window is deleted again; nothing else is ever touched.
  */
-function scheduleProjectionSweep(ctx, sessionId) {
-  for (const delayMs of [1200, 5000, 20000]) {
+function scheduleCleanupSweep(ctx, sessionId, logPath) {
+  for (const delayMs of [1200, 5000, 20000, 60000, 180000]) {
     const timer = setTimeout(() => {
-      void sweepProjectionRecord(ctx, sessionId)
+      void sweepDeletedArtifacts(ctx, sessionId, logPath)
     }, delayMs)
     if (typeof timer?.unref === 'function') timer.unref()
   }
 }
 
-async function sweepProjectionRecord(ctx, sessionId) {
-  const persistence = ctx.get('sessionPersistence')
-  if (!persistence) return
-  let snapshot
-  try {
-    snapshot = await persistence.stat(sessionId)
-  } catch {
-    return
-  }
-  if (snapshot !== undefined) return
-  await removeProjectionRecord(ctx, sessionId, [])
+async function sweepDeletedArtifacts(ctx, sessionId, logPath) {
+  const quiet = []
+  await removeSessionFiles(sessionId, logPath, quiet)
+  await removeProjectionRecord(ctx, sessionId, quiet)
 }
 
 async function removeWithRetry(target, warnings) {
@@ -288,11 +291,31 @@ async function removeWithRetry(target, warnings) {
   return false
 }
 
-function describeOutcome(sessionId, { stopped, files, cached }) {
+/**
+ * Take the archive mark back after the Session is gone. `archiveSession` is the
+ * only supported way to stop running work and hide a Session, so every deletion
+ * adds its id to the durable archive set; dropping it again keeps that set from
+ * growing with ids that no longer name anything. Restoring an id that is not
+ * archived resolves without writing, so this is safe to attempt unconditionally.
+ */
+async function releaseArchiveMark(ctx, sessionId, warnings) {
+  const registry = ctx.get('workspaceRegistry')
+  if (!registry || typeof registry.unarchiveSession !== 'function') return false
+  try {
+    await registry.unarchiveSession(sessionId)
+    return true
+  } catch (error) {
+    warnings.push(`The archive mark could not be released: ${describe(error)}`)
+    return false
+  }
+}
+
+function describeOutcome(sessionId, { stopped, files, cached, released }) {
   const details = []
   if (stopped) details.push('running work stopped')
   details.push(files.attempted ? `${files.removed} log file(s) removed` : 'no stored log')
   details.push(cached ? 'projection checkpoint removed' : 'no projection checkpoint')
+  if (released) details.push('archive mark released')
   return `Deleted session ${sessionId} (${details.join(', ')}).`
 }
 

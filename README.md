@@ -72,7 +72,8 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 - **目录守卫**：只删除「父目录形如 `--…--` 或 `_no-cwd`、目录名匹配会话 id、目录内只有会话日志 / `session.lock` / 临时文件」的目录；任何不符合的情况都会拒绝并如实报告。
 - **非递归删除**：先删允许列表里的文件，再用 `rmdir`（非递归）收尾；目录里若还有别的文件，它会原样保留。
 - **不谎报成功**：删除后再读一次持久化状态，仍能读到会话就返回错误并附上原因与残留路径。
-- **补写清扫**：会话销毁时会再写一次投影检查点，所以删除后会在 1.2s / 5s / 20s 复查并再次清扫（仅在会话确实不存在时动手）。
+- **收回归档标记**：归档只用来「停止运行 + 移出导航」；日志确认删除后，插件会对该 id 调一次 `unarchiveSession` 把标记还回去——此时已没有任何东西可被唤醒，归档集合也不会随着删除次数一直增长。
+- **补写清扫**：活着的 Agent 仍持有持久化句柄，可能把刚删掉的日志或投影检查点写回来。删除后会在 1.2s / 5s / 20s / 60s / 180s 各复查一次，凡是重新出现的同名日志与检查点都按同一套守卫再删一遍。
 - 面向模型的工具不暴露此能力：删除是不可撤销操作，只能由用户在 UI 里确认后触发。
 
 ## 兼容性
@@ -83,7 +84,7 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 
 ## 已知限制
 
-- 删除后会在 Workspace 注册表的 `archivedSessionIds` 里留下该会话 id（归档是停止运行和移出导航的官方机制）。这是惰性残留，不影响界面。
+- 删除后 Workspace 注册表可能仍短暂保留该会话的记账项（`sessionIds`）。读取时它会因为 header 不存在被过滤掉，不会显示成幽灵行，并在下一次工作区变更时清理。
 - 「运行中」提示取决于会话列表投影里的 `running`；取不到时只是少一条警告，删除逻辑不变。
 - 仓库暂无界面截图（作者环境无法截图）。欢迎 PR 补充。
 
@@ -132,6 +133,6 @@ A session deleter plugin for **DeepSeek Harness**. Archiving a session only hide
 
 It removes the session's own JSONL log directory and its persisted projection checkpoint, and hides the session from navigation. Shared content-addressed attachments and the derived full-text index are left alone.
 
-Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent rewrites its projection checkpoint on disposal, so the plugin sweeps it again at 1.2s, 5s, and 20s — only while the session is still gone.
+Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent keeps its persistence handle and can write the log or the projection checkpoint back, so the same guarded removal runs again at 1.2s, 5s, 20s, 60s, and 180s. Archiving is only the way to stop running work and hide the session; once the log is verifiably gone the plugin calls `unarchiveSession` so the durable archive set does not accumulate dead ids.
 
 Licensed under [MIT](LICENSE).
