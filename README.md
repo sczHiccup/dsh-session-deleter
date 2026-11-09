@@ -75,6 +75,7 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 - **归档标记有明确寿命**：归档是「停止运行 + 移出导航」的唯一手段；而且内存里还活着的 Agent 会让已删会话继续留在 Host 的会话列表里（运行时没有销毁他人 Agent 的接口），所以删除后标记会**继续保留**，等该会话不再被任何 Agent 持有后再用 `unarchiveSession` 收回。若进程先退出，下一次启动的清扫会把这些指向空会话的标记收掉，归档集合不会永久增长。
 - **补写清扫**：活着的 Agent 仍持有持久化句柄，可能把刚删掉的日志或投影检查点写回来。删除后会在 1.2s / 5s / 20s / 60s / 180s 各复查一次，凡是重新出现的同名日志与检查点都按同一套守卫再删一遍。
 - **启动回收**：进程退出时仍活着的 Agent 会写下最后一笔投影检查点，那时清扫窗口早已结束。插件在每次启动后（3s / 10s / 30s）用缓存域自己的接口列举记录，把「不在磁盘、也没有活 Agent」的孤儿检查点删掉，同时收回归档集合里指向空会话的标记。
+- **工作区记账清理**：Workspace 注册表只在该记录发生变更时才重新校验成员，所以已删会话的 id 会一直躺在 `sessionIds` 里。删除成功后，插件会对该工作区做一次「同名标题」的实体变更让它重新校验，失效记账当场被剪掉；每次启动时若发现有工作区仍在记账已不存在的会话，也做同样的一次校验。没有失效记账时不会写任何状态。
 - 面向模型的工具不暴露此能力：删除是不可撤销操作，只能由用户在 UI 里确认后触发。
 
 ## 兼容性
@@ -85,7 +86,7 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 
 ## 已知限制
 
-- 删除后 Workspace 注册表可能仍短暂保留该会话的记账项（`sessionIds`）。读取时它会因为 header 不存在被过滤掉，不会显示成幽灵行，并在下一次工作区变更时清理。
+- 删除时如果该会话的 Agent 仍驻留内存，它会继续留在 Host 的会话列表里直到进程结束；归档标记会挡住它，因此界面上看不到，但「显示归档」过滤器里可能仍能看到它，重启后彻底消失。
 - 「运行中」提示取决于会话列表投影里的 `running`；取不到时只是少一条警告，删除逻辑不变。
 - 仓库暂无界面截图（作者环境无法截图）。欢迎 PR 补充。
 
@@ -134,6 +135,6 @@ A session deleter plugin for **DeepSeek Harness**. Archiving a session only hide
 
 It removes the session's own JSONL log directory and its persisted projection checkpoint, and hides the session from navigation. Shared content-addressed attachments and the derived full-text index are left alone.
 
-Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent keeps its persistence handle and can write the log or the projection checkpoint back, so the same guarded removal runs again at 1.2s, 5s, 20s, 60s, and 180s. Archiving is only the way to stop running work and hide the session. A session whose Agent is still resident keeps appearing in the Host session list even after its log is gone, and runtime exposes no way to dispose another owner's Agent, so the archive mark is deliberately kept until nothing holds that session any more. Both leftovers of that design are reclaimed on the next start: the plugin reads the durable Workspace state and the projection-cache domain, and drops archive marks and cached checkpoints whose session is neither stored nor live. The durable archive set and the cache therefore never grow without bound.
+Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent keeps its persistence handle and can write the log or the projection checkpoint back, so the same guarded removal runs again at 1.2s, 5s, 20s, 60s, and 180s. Archiving is only the way to stop running work and hide the session. A session whose Agent is still resident keeps appearing in the Host session list even after its log is gone, and runtime exposes no way to dispose another owner's Agent, so the archive mark is deliberately kept until nothing holds that session any more. Both leftovers of that design are reclaimed on the next start: the plugin reads the durable Workspace state and the projection-cache domain, and drops archive marks and cached checkpoints whose session is neither stored nor live. It also repairs the Workspace account itself: the registry only re-checks membership when its record mutates, so a deletion re-runs that decision (a title write that keeps the title) and the startup pass does the same for any account that still names a session which is neither stored nor live. Nothing is written when there is nothing stale. The durable archive set, the cache, and the workspace accounts therefore never grow without bound.
 
 Licensed under [MIT](LICENSE).

@@ -61,12 +61,18 @@ export function apply(ctx) {
   // is neither stored nor live before touching it.
   ctx.effect(() => {
     let orphanSweepDone = false
+    let accountSweepDone = false
     const timers = [3000, 10000, 30000].map((delayMs) => {
       const timer = setTimeout(() => {
         void releaseStaleArchiveMarks(ctx)
         if (!orphanSweepDone) {
           void releaseOrphanProjectionRecords(ctx).then((done) => {
             orphanSweepDone = done
+          })
+        }
+        if (!accountSweepDone) {
+          void pruneStaleAccounts(ctx).then((done) => {
+            accountSweepDone = done
           })
         }
       }, delayMs)
@@ -122,6 +128,7 @@ async function runDeletion(ctx, invocation) {
   const left = await readSnapshot(persistence, sessionId, undefined)
   const remaining = left ? 'The Session is still readable from storage' : null
   let released = false
+  let pruned = false
   if (remaining) {
     warnings.push(`${remaining}; close Harness or prompt another Session and delete it again.`)
   } else {
@@ -130,9 +137,12 @@ async function runDeletion(ctx, invocation) {
     // settles, then take the archive mark back once nothing is left to hide.
     scheduleCleanupSweep(ctx, sessionId, logPath)
     released = await releaseArchiveWhenGone(ctx, sessionId)
+    // The Workspace registry keeps accounting the id until something re-checks
+    // membership. Now that the log is gone, re-checking drops it for good.
+    pruned = await pruneSessionAccount(ctx, sessionId, warnings)
   }
 
-  const summary = describeOutcome(sessionId, { stopped, files, cached, released })
+  const summary = describeOutcome(sessionId, { stopped, files, cached, released, pruned })
   if (warnings.length > 0) {
     return { kind: remaining ? 'error' : 'success', text: `${summary}\n${warnings.join('\n')}` }
   }
@@ -428,6 +438,95 @@ async function releaseOrphanProjectionRecords(ctx) {
 }
 
 /**
+ * Drop a deleted Session from the Workspace record that still accounts for it.
+ *
+ * The registry decides membership when a Workspace record mutates and only
+ * filters invalid accounts on read, so a dead id can stay in `sessionIds`
+ * indefinitely. Re-running that decision means one mutation of the record, and
+ * setting the title it already has is the least visible one; it removes every
+ * stale account in that Workspace in a single write.
+ */
+async function pruneSessionAccount(ctx, sessionId, warnings) {
+  const registry = ctx.get('workspaceRegistry')
+  if (typeof registry?.list !== 'function') return false
+  let entities
+  try {
+    entities = registry.list()
+  } catch {
+    return false
+  }
+  for (const entity of entities) {
+    if (!accountedIds(entity).includes(sessionId)) continue
+    const pruned = await revalidateWorkspace(entity, warnings)
+    if (!pruned && warnings) {
+      warnings.push('The Workspace still accounts for this Session; it stays until a later mutation.')
+    }
+    return pruned
+  }
+  return false
+}
+
+/**
+ * Re-check every Workspace account against storage at start. Runs only when a
+ * Workspace actually accounts for something that is neither stored nor live, so
+ * an ordinary start writes nothing.
+ *
+ * @returns whether a full pass ran, so a caller does not repeat it.
+ */
+async function pruneStaleAccounts(ctx) {
+  const registry = ctx.get('workspaceRegistry')
+  const persistence = ctx.get('sessionPersistence')
+  const agents = ctx.get('agents')
+  if (typeof registry?.list !== 'function' || !persistence) return false
+
+  let entities
+  try {
+    entities = registry.list()
+  } catch {
+    return false
+  }
+
+  for (const entity of entities) {
+    const ids = accountedIds(entity)
+    let stale = false
+    for (const id of ids) {
+      if (typeof id !== 'string' || id.length === 0) continue
+      if (typeof agents?.get === 'function' && agents.get(id) !== undefined) continue
+      try {
+        if ((await persistence.stat(id)) !== undefined) continue
+      } catch {
+        continue
+      }
+      stale = true
+      break
+    }
+    if (!stale) continue
+    await revalidateWorkspace(entity, [])
+  }
+  return true
+}
+
+function accountedIds(entity) {
+  try {
+    const ids = entity?.sessionIds
+    return Array.isArray(ids) ? ids : []
+  } catch {
+    return []
+  }
+}
+
+async function revalidateWorkspace(entity, warnings) {
+  try {
+    if (typeof entity?.setTitle !== 'function') return false
+    await entity.setTitle(entity.title)
+  } catch (error) {
+    warnings?.push(`The Workspace account could not be pruned: ${describe(error)}`)
+    return false
+  }
+  return true
+}
+
+/**
  * The supported way to take a mark back. Restoring an id that is not archived
  * resolves without writing, so an absent mark is not an error.
  */
@@ -443,12 +542,13 @@ async function releaseArchiveMark(ctx, sessionId, warnings) {
   }
 }
 
-function describeOutcome(sessionId, { stopped, files, cached, released }) {
+function describeOutcome(sessionId, { stopped, files, cached, released, pruned }) {
   const details = []
   if (stopped) details.push('running work stopped')
   details.push(files.attempted ? `${files.removed} log file(s) removed` : 'no stored log')
   details.push(cached ? 'projection checkpoint removed' : 'no projection checkpoint')
   if (released) details.push('archive mark released')
+  if (pruned) details.push('workspace account pruned')
   return `Deleted session ${sessionId} (${details.join(', ')}).`
 }
 
