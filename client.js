@@ -308,7 +308,12 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError(null)
         try {
-          const result = await ctx.remote.commands.execute(request.sessionId, `/${COMMAND} ${request.sessionId}`, [])
+          const commands = ctx.remote?.commands
+          if (typeof commands?.execute !== 'function') {
+            setError(`${t('error.prefix')}the Host command channel is unavailable`)
+            return
+          }
+          const result = await commands.execute(request.sessionId, `/${COMMAND} ${request.sessionId}`, [])
           if (!result || result.ok !== true) {
             setError(`${t('error.prefix')}${result?.error?.message ?? result?.error?.code ?? 'command failed'}`)
             return
@@ -448,7 +453,9 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
 
     return {
-      inject: ['slots', 'remote.commands', 'contextMenus', 'sessions'],
+      // `remote` is the parent Service that owns the mounted namespace: reading
+      // ctx.remote.commands touches both, so both must be injected.
+      inject: ['slots', 'remote', 'remote.commands', 'contextMenus', 'sessions'],
       apply(ctx) {
         const deleteRequest = createStore(null)
         const requestDelete = (request) => {
