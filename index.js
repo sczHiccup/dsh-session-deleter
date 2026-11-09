@@ -136,10 +136,9 @@ async function runDeletion(ctx, invocation) {
     // write the log and its projection checkpoint back. Sweep both while it
     // settles, then take the archive mark back once nothing is left to hide.
     scheduleCleanupSweep(ctx, sessionId, logPath)
-    released = await releaseArchiveWhenGone(ctx, sessionId)
-    // The Workspace registry keeps accounting the id until something re-checks
-    // membership. Now that the log is gone, re-checking drops it for good.
-    pruned = await pruneSessionAccount(ctx, sessionId, warnings)
+    const settled = await releaseWhenGone(ctx, sessionId)
+    released = settled.released
+    pruned = settled.pruned
   }
 
   const summary = describeOutcome(sessionId, { stopped, files, cached, released, pruned })
@@ -308,7 +307,7 @@ async function sweepDeletedArtifacts(ctx, sessionId, logPath) {
   const quiet = []
   await removeSessionFiles(sessionId, logPath, quiet)
   await removeProjectionRecord(ctx, sessionId, quiet)
-  await releaseArchiveWhenGone(ctx, sessionId)
+  await releaseWhenGone(ctx, sessionId)
 }
 
 async function removeWithRetry(target, warnings) {
@@ -330,18 +329,22 @@ async function removeWithRetry(target, warnings) {
 }
 
 /**
- * Take the archive mark back only once it has nothing left to do.
- *
- * The archive set is what keeps a Session out of navigation, and a Session whose
- * Agent is still resident stays in the Host's session list even after its log is
- * gone: releasing the mark then makes a deleted Session reappear in the sidebar.
- * Runtime exposes no way to dispose another owner's Agent, so the mark is kept
- * while `agents` still holds the Session and released as soon as it does not.
+ * Both leftovers of a deletion — the archive mark and the Workspace account —
+ * are only removable once the Session is gone from memory as well as from
+ * storage: the registry counts a live Session as a valid member, and the mark is
+ * what keeps that live Session out of navigation. Runtime exposes no way to
+ * dispose another owner's Agent, so this runs when no Agent holds the Session,
+ * is retried by the cleanup sweep, and runs again at the next start for a
+ * process that ended first.
  */
-async function releaseArchiveWhenGone(ctx, sessionId) {
+async function releaseWhenGone(ctx, sessionId) {
   const agents = ctx.get('agents')
-  if (typeof agents?.get === 'function' && agents.get(sessionId) !== undefined) return false
-  return releaseArchiveMark(ctx, sessionId, [])
+  if (typeof agents?.get === 'function' && agents.get(sessionId) !== undefined) {
+    return { released: false, pruned: false }
+  }
+  const released = await releaseArchiveMark(ctx, sessionId, [])
+  const pruned = await pruneSessionAccount(ctx, sessionId)
+  return { released, pruned }
 }
 
 /**
@@ -446,7 +449,7 @@ async function releaseOrphanProjectionRecords(ctx) {
  * setting the title it already has is the least visible one; it removes every
  * stale account in that Workspace in a single write.
  */
-async function pruneSessionAccount(ctx, sessionId, warnings) {
+async function pruneSessionAccount(ctx, sessionId) {
   const registry = ctx.get('workspaceRegistry')
   if (typeof registry?.list !== 'function') return false
   let entities
@@ -457,11 +460,10 @@ async function pruneSessionAccount(ctx, sessionId, warnings) {
   }
   for (const entity of entities) {
     if (!accountedIds(entity).includes(sessionId)) continue
-    const pruned = await revalidateWorkspace(entity, warnings)
-    if (!pruned && warnings) {
-      warnings.push('The Workspace still accounts for this Session; it stays until a later mutation.')
-    }
-    return pruned
+    if (!(await revalidateWorkspace(entity))) return false
+    // The registry keeps a live Session as a valid member even after its log is
+    // gone, so a surviving id is a refusal, not a success.
+    return !accountedIds(entity).includes(sessionId)
   }
   return false
 }
