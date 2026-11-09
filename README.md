@@ -19,6 +19,7 @@ DeepSeek Harness 的侧栏只能「归档」会话，归档只是把会话从导
 - **侧栏会话行 `...` 菜单里的「删除会话」** —— 与内置的「重命名 / 归档 / 固定」同处一个菜单，带危险色与分隔线。
 - **风险确认弹窗** —— 说明不可撤销、显示目标会话名、**必须勾选**确认项才能继续；支持 `Esc`、点遮罩、取消关闭，并在关闭后把焦点还给原控件。
 - **运行中的会话会额外警告** —— 仍然确认时，先停止该会话正在进行的回合、子代理、后台任务与提醒，然后再删除。
+- **级联删除子代理会话** —— 会话日志头里的 `parentSession` 指向它的子会话（子代理产生的会话，可跨多层）会一并删除。这些子会话在 UI 里没有独立入口，父会话消失后没人能再访问它们，留着只会变成不可见的磁盘残留。
 - 成功后显示服务端返回的结果摘要；如果被删的正是当前界面停留的会话，会自动切到新会话。
 
 ## 安装
@@ -56,7 +57,8 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 | 内容 | 路径 |
 |---|---|
 | 会话日志（含历史格式代） | `<DSH_HOME>/sessions/--<cwd>--/<sessionId>/session[.vN].jsonl[.zstd]` |
-| 投影检查点缓存 | `<DSH_HOME>/storages/session_projcache/sessions/<sessionId>.json` |
+| 子代理后代会话的日志 | 同上，对每个 `parentSession` 指向它的子会话递归处理 |
+| 投影检查点缓存 | `<DSH_HOME>/storages/session_projcache/sessions/<sessionId>.json`（含子会话） |
 | 侧栏导航入口 | 通过 Workspace 归档移出导航 |
 
 不会删除：

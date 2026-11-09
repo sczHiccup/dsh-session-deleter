@@ -119,9 +119,13 @@ async function runDeletion(ctx, invocation) {
 
   const warnings = []
   const logPath = typeof snapshot?.location?.path === 'string' ? snapshot.location.path : null
+  // Read the lineage before anything is removed: a subagent Session carries its
+  // parent in the stored header, and deleting the parent must not orphan it.
+  const descendants = await collectDescendants(persistence, sessionId)
   const stopped = await stopRunningWork(ctx, sessionId, warnings)
   const files = await removeSessionFiles(sessionId, logPath, warnings)
   const cached = await removeProjectionRecord(ctx, sessionId, warnings)
+  const cascaded = await removeDescendants(ctx, descendants, warnings)
 
   // Report the truth: a Session still readable from storage after the attempt
   // is not deleted, most often because a live Agent still holds its handle.
@@ -141,7 +145,7 @@ async function runDeletion(ctx, invocation) {
     pruned = settled.pruned
   }
 
-  const summary = describeOutcome(sessionId, { stopped, files, cached, released, pruned })
+  const summary = describeOutcome(sessionId, { stopped, files, cached, released, pruned, cascaded })
   if (warnings.length > 0) {
     return { kind: remaining ? 'error' : 'success', text: `${summary}\n${warnings.join('\n')}` }
   }
@@ -167,6 +171,63 @@ async function stopRunningWork(ctx, sessionId, warnings) {
     warnings.push(`Running work could not be stopped: ${describe(error)}`)
     return false
   }
+}
+
+/**
+ * Every stored Session whose header records this one as its parent, at any
+ * depth. Subagent Sessions are the only Sessions that carry `parentSession`
+ * (a fork deliberately drops it), so this is exactly the subagent subtree.
+ */
+async function collectDescendants(persistence, sessionId) {
+  let snapshots
+  try {
+    snapshots = await persistence.list()
+  } catch {
+    return []
+  }
+  const byParent = new Map()
+  for (const snapshot of snapshots ?? []) {
+    const parent = snapshot?.header?.parentSession
+    if (typeof parent !== 'string' || parent.length === 0) continue
+    if (!byParent.has(parent)) byParent.set(parent, [])
+    byParent.get(parent).push(snapshot)
+  }
+
+  const descendants = []
+  const seen = new Set([sessionId])
+  const queue = [sessionId]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    for (const child of byParent.get(current) ?? []) {
+      const id = child?.header?.id
+      if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue
+      seen.add(id)
+      descendants.push(child)
+      queue.push(id)
+    }
+  }
+  return descendants
+}
+
+/**
+ * Remove the subagent subtree of a deleted Session. These children have no
+ * navigation entry and no Workspace account of their own, so once the parent is
+ * gone nothing in the UI can reach them — leaving their logs behind would be an
+ * invisible leak. They get the same guarded removal and the same cleanup sweep
+ * as the parent, because a still-resident child Agent can write its log back.
+ */
+async function removeDescendants(ctx, descendants, warnings) {
+  let removed = 0
+  for (const snapshot of descendants) {
+    const id = snapshot?.header?.id
+    if (typeof id !== 'string' || id.length === 0) continue
+    const logPath = typeof snapshot?.location?.path === 'string' ? snapshot.location.path : null
+    await removeSessionFiles(id, logPath, warnings)
+    await removeProjectionRecord(ctx, id, warnings)
+    scheduleCleanupSweep(ctx, id, logPath)
+    removed += 1
+  }
+  return removed
 }
 
 /**
@@ -570,11 +631,12 @@ async function releaseArchiveMark(ctx, sessionId, warnings) {
   }
 }
 
-function describeOutcome(sessionId, { stopped, files, cached, released, pruned }) {
+function describeOutcome(sessionId, { stopped, files, cached, released, pruned, cascaded }) {
   const details = []
   if (stopped) details.push('running work stopped')
   details.push(files.attempted ? `${files.removed} log file(s) removed` : 'no stored log')
   details.push(cached ? 'projection checkpoint removed' : 'no projection checkpoint')
+  if (cascaded > 0) details.push(`${cascaded} subagent session(s) removed`)
   if (released) details.push('archive mark released')
   if (pruned) details.push('workspace account pruned')
   return `Deleted session ${sessionId} (${details.join(', ')}).`

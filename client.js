@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
         'action.delete': 'Delete session',
         'dialog.title': 'Delete this session permanently?',
         'dialog.body':
-          'This removes the conversation history, the session log on disk, and the cached projections for this session. It cannot be undone or restored.',
+          'This removes the conversation history, the session log on disk, and the cached projections for this session. Any subagent sessions it owns are deleted with it. It cannot be undone or restored.',
         'dialog.running':
           'This session is running. Deleting it first stops its current turn, its running subagents, its background jobs, and its active reminders.',
         'dialog.target': 'Session',
@@ -33,7 +33,7 @@ window.__ModuleLoader__.load({
         'action.delete': '删除会话',
         'dialog.title': '彻底删除该会话？',
         'dialog.body':
-          '这会删除该会话的聊天记录、磁盘上的会话日志以及本地投影缓存，操作不可撤销，也无法恢复。',
+          '这会删除该会话的聊天记录、磁盘上的会话日志以及本地投影缓存；它名下的子代理会话（如果有）也会一并删除。操作不可撤销，也无法恢复。',
         'dialog.running':
           '该会话正在运行。继续删除会先停止它正在进行的回合、正在运行的子代理、后台任务与提醒，然后再删除。',
         'dialog.target': '会话',
