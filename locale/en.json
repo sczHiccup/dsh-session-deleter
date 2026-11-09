@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session deleter",
+    "description": "Deletes a session permanently after a risk confirmation: a trash button in the conversation header and a Delete session row in the sidebar menu, which stop running work and remove the session log and its cached projections."
+  }
+}

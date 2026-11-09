@@ -1,0 +1,3 @@
+- insert:
+    - id: session-deleter
+      name: '@local/session-deleter'
