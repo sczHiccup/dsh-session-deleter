@@ -451,7 +451,8 @@ async function releaseOrphanProjectionRecords(ctx) {
  */
 async function pruneSessionAccount(ctx, sessionId) {
   const registry = ctx.get('workspaceRegistry')
-  if (typeof registry?.list !== 'function') return false
+  const table = workspaceAccountTable(ctx)
+  if (typeof registry?.list !== 'function' || !table) return false
   let entities
   try {
     entities = registry.list()
@@ -459,11 +460,11 @@ async function pruneSessionAccount(ctx, sessionId) {
     return false
   }
   for (const entity of entities) {
-    if (!accountedIds(entity).includes(sessionId)) continue
+    if (!durableAccountIds(table, entity?.id).includes(sessionId)) continue
     if (!(await revalidateWorkspace(entity))) return false
     // The registry keeps a live Session as a valid member even after its log is
     // gone, so a surviving id is a refusal, not a success.
-    return !accountedIds(entity).includes(sessionId)
+    return !durableAccountIds(table, entity?.id).includes(sessionId)
   }
   return false
 }
@@ -473,13 +474,18 @@ async function pruneSessionAccount(ctx, sessionId) {
  * Workspace actually accounts for something that is neither stored nor live, so
  * an ordinary start writes nothing.
  *
+ * Detection reads the durable record, not `entity.sessionIds`: that getter
+ * already filters invalid accounts out, so a stale id is invisible there while
+ * it still sits in the stored record — and only a record mutation drops it.
+ *
  * @returns whether a full pass ran, so a caller does not repeat it.
  */
 async function pruneStaleAccounts(ctx) {
   const registry = ctx.get('workspaceRegistry')
   const persistence = ctx.get('sessionPersistence')
   const agents = ctx.get('agents')
-  if (typeof registry?.list !== 'function' || !persistence) return false
+  const table = workspaceAccountTable(ctx)
+  if (typeof registry?.list !== 'function' || !persistence || !table) return false
 
   let entities
   try {
@@ -489,7 +495,7 @@ async function pruneStaleAccounts(ctx) {
   }
 
   for (const entity of entities) {
-    const ids = accountedIds(entity)
+    const ids = durableAccountIds(table, entity?.id)
     let stale = false
     for (const id of ids) {
       if (typeof id !== 'string' || id.length === 0) continue
@@ -503,14 +509,34 @@ async function pruneStaleAccounts(ctx) {
       break
     }
     if (!stale) continue
-    await revalidateWorkspace(entity, [])
+    await revalidateWorkspace(entity)
   }
   return true
 }
 
-function accountedIds(entity) {
+/** The durable Workspace records, through the storage domain the registry uses. */
+function workspaceAccountTable(ctx) {
+  const facility = ctx.get('storageDomain')
+  if (typeof facility?.get !== 'function') return undefined
+  let domain
   try {
-    const ids = entity?.sessionIds
+    domain = facility.get('workspace')
+  } catch {
+    return undefined
+  }
+  if (!domain || typeof domain.table !== 'function') return undefined
+  try {
+    return domain.table('workspaces')
+  } catch {
+    return undefined
+  }
+}
+
+function durableAccountIds(table, workspaceId) {
+  if (typeof workspaceId !== 'string' || workspaceId.length === 0) return []
+  try {
+    const record = table?.get?.(workspaceId)
+    const ids = record?.sessionIds
     return Array.isArray(ids) ? ids : []
   } catch {
     return []
