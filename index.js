@@ -51,12 +51,24 @@ export const inject = ['commands']
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
-  // A deletion whose Agent outlived the process leaves its archive mark behind;
-  // nothing can be live this early after a start, so stale marks can be proven.
+  // Startup reclamation, twice over:
+  // - archive marks whose Session no longer exists (a deletion whose Agent
+  //   outlived the process left its mark behind by design);
+  // - projection checkpoints whose Session no longer exists (a resident Agent
+  //   writes its final checkpoint while the process shuts down, long after the
+  //   deletion sweep window closed).
+  // Nothing can be live this early after a start, and both passes prove each id
+  // is neither stored nor live before touching it.
   ctx.effect(() => {
+    let orphanSweepDone = false
     const timers = [3000, 10000, 30000].map((delayMs) => {
       const timer = setTimeout(() => {
         void releaseStaleArchiveMarks(ctx)
+        if (!orphanSweepDone) {
+          void releaseOrphanProjectionRecords(ctx).then((done) => {
+            orphanSweepDone = done
+          })
+        }
       }, delayMs)
       if (typeof timer?.unref === 'function') timer.unref()
       return timer
@@ -64,7 +76,7 @@ export function apply(ctx) {
     return () => {
       for (const timer of timers) clearTimeout(timer)
     }
-  }, 'session-deleter: stale archive marks')
+  }, 'session-deleter: startup reclamation')
 
   ctx.effect(() =>
     ctx.commands.register({
@@ -358,6 +370,61 @@ async function releaseStaleArchiveMarks(ctx) {
       // A refusal leaves the mark in place; the next start tries again.
     }
   }
+}
+
+/**
+ * Drop projection checkpoints whose Session no longer exists.
+ *
+ * A resident Agent writes its final checkpoint while it is disposed, which for a
+ * deleted Session can happen at process shutdown — after every cleanup sweep has
+ * run. The cache is a derived store with no eviction surface, so the next start
+ * is the first moment that write can be observed; it is also the moment nothing
+ * can be live, so a missing Session proves the record is garbage. The pass goes
+ * through the cache's own domain so memory and medium stay consistent.
+ *
+ * @returns whether a full pass ran, so a caller does not repeat it.
+ */
+async function releaseOrphanProjectionRecords(ctx) {
+  const facility = ctx.get('storageDomain')
+  const domain = typeof facility?.get === 'function' ? facility.get(CACHE_DOMAIN) : undefined
+  if (!domain || typeof domain.table !== 'function') return false
+
+  let table
+  try {
+    table = domain.table(CACHE_TABLE)
+  } catch {
+    return false
+  }
+  if (!table || typeof table.keys !== 'function' || typeof table.delete !== 'function') return false
+
+  const persistence = ctx.get('sessionPersistence')
+  if (!persistence) return false
+  const agents = ctx.get('agents')
+
+  let keys
+  try {
+    keys = Array.from(table.keys())
+  } catch {
+    return false
+  }
+
+  for (const sessionId of keys) {
+    if (typeof sessionId !== 'string' || sessionId.length === 0) continue
+    if (typeof agents?.get === 'function' && agents.get(sessionId) !== undefined) continue
+    let stored
+    try {
+      stored = (await persistence.stat(sessionId)) !== undefined
+    } catch {
+      continue
+    }
+    if (stored) continue
+    try {
+      await table.delete(sessionId)
+    } catch {
+      // A refusal leaves the record; the next start tries again.
+    }
+  }
+  return true
 }
 
 /**
