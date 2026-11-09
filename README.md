@@ -72,7 +72,7 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 - **目录守卫**：只删除「父目录形如 `--…--` 或 `_no-cwd`、目录名匹配会话 id、目录内只有会话日志 / `session.lock` / 临时文件」的目录；任何不符合的情况都会拒绝并如实报告。
 - **非递归删除**：先删允许列表里的文件，再用 `rmdir`（非递归）收尾；目录里若还有别的文件，它会原样保留。
 - **不谎报成功**：删除后再读一次持久化状态，仍能读到会话就返回错误并附上原因与残留路径。
-- **收回归档标记**：归档只用来「停止运行 + 移出导航」；日志确认删除后，插件会对该 id 调一次 `unarchiveSession` 把标记还回去——此时已没有任何东西可被唤醒，归档集合也不会随着删除次数一直增长。
+- **归档标记有明确寿命**：归档是「停止运行 + 移出导航」的唯一手段；而且内存里还活着的 Agent 会让已删会话继续留在 Host 的会话列表里（运行时没有销毁他人 Agent 的接口），所以删除后标记会**继续保留**，等该会话不再被任何 Agent 持有后再用 `unarchiveSession` 收回。若进程先退出，下一次启动的清扫会把这些指向空会话的标记收掉，归档集合不会永久增长。
 - **补写清扫**：活着的 Agent 仍持有持久化句柄，可能把刚删掉的日志或投影检查点写回来。删除后会在 1.2s / 5s / 20s / 60s / 180s 各复查一次，凡是重新出现的同名日志与检查点都按同一套守卫再删一遍。
 - 面向模型的工具不暴露此能力：删除是不可撤销操作，只能由用户在 UI 里确认后触发。
 
@@ -133,6 +133,6 @@ A session deleter plugin for **DeepSeek Harness**. Archiving a session only hide
 
 It removes the session's own JSONL log directory and its persisted projection checkpoint, and hides the session from navigation. Shared content-addressed attachments and the derived full-text index are left alone.
 
-Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent keeps its persistence handle and can write the log or the projection checkpoint back, so the same guarded removal runs again at 1.2s, 5s, 20s, 60s, and 180s. Archiving is only the way to stop running work and hide the session; once the log is verifiably gone the plugin calls `unarchiveSession` so the durable archive set does not accumulate dead ids.
+Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent keeps its persistence handle and can write the log or the projection checkpoint back, so the same guarded removal runs again at 1.2s, 5s, 20s, 60s, and 180s. Archiving is only the way to stop running work and hide the session. A session whose Agent is still resident keeps appearing in the Host session list even after its log is gone, and runtime exposes no way to dispose another owner's Agent, so the archive mark is deliberately kept until nothing holds that session any more; only then — or at the next start, for a process that ended first — is `unarchiveSession` called, so the durable archive set never grows without bound.
 
 Licensed under [MIT](LICENSE).
