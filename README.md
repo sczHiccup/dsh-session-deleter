@@ -82,7 +82,8 @@ plugin_manager → action: install_bundle → target: <本仓库目录的绝对�
 
 ## 兼容性
 
-- 面向 DeepSeek Harness `0.2.2-rc.1` 编写，使用公开服务：`commands`、`sessionPersistence`、`workspaceRegistry`、`storageDomain`，以及客户端 `slots`、`contextMenus`、`sessions`、`remote.commands`。
+- 已在 DeepSeek Harness `0.2.2-rc.3` 上实机验证（最初面向 `0.2.2-rc.1` 编写），使用公开服务：`commands`、`sessionPersistence`、`workspaceRegistry`、`storageDomain`，以及客户端 `slots`、`contextMenus`、`sessions`、`remote.commands`。
+- 验证路径（0.2.2-rc.3 / Windows）：UI 确认删除 → 会话日志目录与投影检查点消失 → 归档标记把会话移出导航 → 该会话的 Agent 仍驻留时，标记与工作区记账按设计保留 → 下次启动的回收把两者清空，`workspace.json` 的 `archivedSessionIds` 与 `sessionIds` 均不再残留。
 - 不 import 任何 Harness Client 包；样式只使用 `--dsw-alias-*` 主题令牌（危险按钮的遮罩用了 `color-mix` 混合令牌，随明暗主题变化）。
 - 若未来 Harness 改动了日志目录布局，守卫会**拒绝删除**而不是误删。
 
@@ -138,5 +139,9 @@ A session deleter plugin for **DeepSeek Harness**. Archiving a session only hide
 It removes the session's own JSONL log directory and its persisted projection checkpoint, and hides the session from navigation. Shared content-addressed attachments and the derived full-text index are left alone.
 
 Every destructive step is guarded: it only touches a directory that proves to be the documented per-session layout, deletes files from an allow-list, finishes with a non-recursive `rmdir`, re-reads persistence afterwards and reports leftovers instead of claiming success. A live agent keeps its persistence handle and can write the log or the projection checkpoint back, so the same guarded removal runs again at 1.2s, 5s, 20s, 60s, and 180s. Archiving is only the way to stop running work and hide the session. A session whose Agent is still resident keeps appearing in the Host session list even after its log is gone, and runtime exposes no way to dispose another owner's Agent, so the archive mark is deliberately kept until nothing holds that session any more. Both leftovers of that design are reclaimed on the next start: the plugin reads the durable Workspace state and the projection-cache domain, and drops archive marks and cached checkpoints whose session is neither stored nor live. It also repairs the Workspace account itself: the registry only re-checks membership when its record mutates, so a deletion re-runs that decision (a title write that keeps the title) and the startup pass does the same for any account that still names a session which is neither stored nor live. Nothing is written when there is nothing stale. The durable archive set, the cache, and the workspace accounts therefore never grow without bound.
+
+### Compatibility
+
+Verified on DeepSeek Harness `0.2.2-rc.3` (originally written for `0.2.2-rc.1`). A real deletion through the UI removed the session's log directory and projection checkpoint, hid the session through the archive mark, kept that mark and the workspace account while the session's Agent stayed resident, and the next start reclaimed both, leaving `archivedSessionIds` and the workspace `sessionIds` clean.
 
 Licensed under [MIT](LICENSE).
